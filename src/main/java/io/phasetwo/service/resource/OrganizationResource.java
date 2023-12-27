@@ -8,9 +8,12 @@ import com.google.common.collect.ImmutableMap;
 import io.phasetwo.service.auth.action.PortalLinkActionToken;
 import io.phasetwo.service.model.OrganizationModel;
 import io.phasetwo.service.model.OrganizationRoleModel;
+import io.phasetwo.service.model.OrganizationProfile;
+import io.phasetwo.service.model.profile.OrganizationProfileContext;
+import io.phasetwo.service.model.profile.exception.ValidationException;
+import io.phasetwo.service.model.OrganizationProfileProvider;
 import io.phasetwo.service.representation.Organization;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.*;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -18,12 +21,20 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
 import lombok.extern.jbosslog.JBossLog;
 import org.keycloak.common.util.Time;
 import org.keycloak.events.admin.OperationType;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.Constants;
 import org.keycloak.models.UserModel;
+import org.keycloak.representations.idm.ErrorRepresentation;
+import org.keycloak.services.ErrorResponse;
+import org.keycloak.services.ErrorResponseException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.RealmsResource;
@@ -125,32 +136,95 @@ public class OrganizationResource extends OrganizationAdminResource {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public Response updateOrg(@Valid Organization body) {
-    log.debugf("Update org for %s", realm.getName());
+    log.debugf("User update org for %s", realm.getName());
 
     if (auth.hasManageOrgs() || auth.hasOrgManageOrg(organization)) {
-
-      organization.setName(body.getName());
-      organization.setDisplayName(body.getDisplayName());
-      organization.setUrl(body.getUrl());
-      organization.removeAttributes();
-      if (body.getAttributes() != null)
-        body.getAttributes().forEach((k, v) -> organization.setAttribute(k, v));
-      if (body.getDomains() != null) organization.setDomains(body.getDomains());
+      try {
+        OrganizationProfileProvider provider = session.getProvider(OrganizationProfileProvider.class);
+        OrganizationProfile profile = provider.create(OrganizationProfileContext.UPDATE_PROFILE, getRawAttributes(body), organization);
+        validateAndUpdateOrganizationProfile(body, profile);
+      } catch (ErrorResponseException errorResponseException) {
+        return errorResponseException.getResponse();
+      } catch (Exception e) {
+        log.errorf("Unexpected error during profile validation '%s'", e.getMessage());
+        return Response.serverError().build();
+      }
 
       Organization o = convertOrganizationModelToOrganization(organization);
 
       adminEvent
-          .resource(ORGANIZATION.name())
-          .operation(OperationType.UPDATE)
-          .resourcePath(session.getContext().getUri(), o.getId())
-          .representation(o)
-          .success();
+              .resource(ORGANIZATION.name())
+              .operation(OperationType.UPDATE)
+              .resourcePath(session.getContext().getUri(), o.getId())
+              .representation(o)
+              .success();
 
       return Response.noContent().build();
     } else {
       throw new NotAuthorizedException(
           String.format("Insufficient permission to modify %s", organization.getId()));
     }
+  }
+  
+  @PUT
+  @Path("/manage")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response updateOrgMetadata(@Valid Organization body) {
+    log.debugf("Admin update org for %s", realm.getName());
+
+    if (auth.hasManageOrgs()) {
+      try {
+        OrganizationProfile profile = session.getProvider(OrganizationProfileProvider.class)
+                .create(OrganizationProfileContext.UPDATE_METADATA, getRawAttributes(body), organization);
+        validateAndUpdateOrganizationProfile(body, profile);
+      } catch (ErrorResponseException errorResponseException) {
+        return errorResponseException.getResponse();
+      } catch (Exception e) {
+        log.errorf("Unexpected error during profile validation '%s'", e.getMessage());
+        return Response.serverError().build();
+      }
+
+      Organization o = convertOrganizationModelToOrganization(organization);
+
+      adminEvent
+              .resource(ORGANIZATION.name())
+              .operation(OperationType.UPDATE)
+              .resourcePath(session.getContext().getUri(), o.getId())
+              .representation(o)
+              .success();
+
+      return Response.noContent().build();
+    } else {
+      throw new NotAuthorizedException(
+              String.format("Insufficient permission to modify %s", organization.getId()));
+    }
+  }
+
+  private Map<String, List<String>> getRawAttributes(Organization body) {
+    // Add organization name to attribute validation
+    Map<String, List<String>> attrs = body.getAttributes();
+    attrs.put(OrganizationModel.NAME, Collections.singletonList(body.getName()));
+    return attrs;
+  }
+
+  private void validateAndUpdateOrganizationProfile(Organization body, OrganizationProfile profile) {
+    try {
+      profile.validate();
+    } catch (ValidationException pve) {
+      List<ErrorRepresentation> errors = new ArrayList<>();
+      for (ValidationException.Error error : pve.getErrors()) {
+        errors.add(new ErrorRepresentation(error.getAttribute(), error.getMessage(), error.getMessageParameters()));
+      }
+
+      throw ErrorResponse.errors(errors, Response.Status.BAD_REQUEST);
+    }
+
+    profile.update(body.getAttributes() != null);
+    organization.setName(body.getName());
+    organization.setDisplayName(body.getDisplayName());
+    organization.setUrl(body.getUrl());
+    if (body.getDomains() != null) organization.setDomains(body.getDomains());
   }
 
   /////////////////////////////////////////////////////
