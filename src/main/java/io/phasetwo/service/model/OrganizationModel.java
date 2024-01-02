@@ -13,6 +13,7 @@ import org.keycloak.models.UserModel;
 import org.keycloak.provider.ProviderEvent;
 
 public interface OrganizationModel {
+  String NAME = "name";
 
   String getId();
 
